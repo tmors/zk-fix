@@ -1,0 +1,22 @@
+{
+    "networks": {
+        "local": {
+            "l1_url": "http://reth:8545",
+            "explorer_prefix": "http://localhost:15001/",
+            "explorer_address_prefix": "http://localhost:15001/address/",
+            "single_bridges": {},
+            "shared_bridges": {
+                "kl_exp": {
+                    "chains": {
+                        "zkmintlayer": {
+                            "chain_id": "0x10e",
+                            "l2_url": "http://zkmintlayer:3050",
+                            "explorer": "http://localhost:15005/?network=local",
+                            "type": "rollup"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
