@@ -1,3 +1,8 @@
+use std::{env, io::Cursor};
+
+use reqwest::Client;
+use s3::{creds::Credentials, region::Region, Bucket};
+use serde_json::{json, Value};
 use tokio::sync::watch;
 use zksync_config::configs::eth_sender::SenderConfig;
 use zksync_contracts::BaseSystemContractsHashes;
@@ -62,6 +67,8 @@ pub struct EthTxAggregator {
     /// address.
     custom_commit_sender_addr: Option<Address>,
     pool: ConnectionPool<Core>,
+    // the ipfs hash queue
+    ipfs_hash_queue: Vec<String>,
 }
 
 struct TxData {
@@ -85,6 +92,8 @@ impl EthTxAggregator {
         let eth_client = eth_client.for_component("eth_tx_aggregator");
         let functions = ZkSyncFunctions::default();
         let base_nonce = eth_client.pending_nonce().await.unwrap().as_u64();
+
+        let ipfs_hash_queue: Vec<String> = Vec::new();
 
         let base_nonce_custom_commit_sender = match custom_commit_sender_addr {
             Some(addr) => Some(
@@ -110,6 +119,7 @@ impl EthTxAggregator {
             rollup_chain_id,
             custom_commit_sender_addr,
             pool,
+            ipfs_hash_queue,
         }
     }
 
@@ -367,6 +377,7 @@ impl EthTxAggregator {
             params: verifier_params,
             recursion_scheduler_level_vk_hash,
         };
+
         if let Some(agg_op) = self
             .aggregator
             .get_next_ready_operation(
@@ -381,8 +392,164 @@ impl EthTxAggregator {
                 .save_eth_tx(storage, &agg_op, contracts_are_pre_shared_bridge)
                 .await?;
             Self::report_eth_tx_saving(storage, &agg_op, &tx).await;
+
+            // zkmintlayer: A method `save_mintlayer_tx` to send the op to ipfs and mintlayer.
+            self.save_mintlayer_tx(&agg_op).await;
         }
+
         Ok(())
+    }
+
+    async fn save_mintlayer_tx(&mut self, aggregated_op: &AggregatedOperation) {
+        // send op to ipfs through 4everland gateway
+        let api_key = env::var("4EVERLAND_API_KEY").unwrap();
+        let secret_key = env::var("4EVERLAND_SECRET_KEY").unwrap();
+        let bucket_name = env::var("4EVERLAND_BUCKET_NAME").unwrap();
+        let credentials =
+            Credentials::new(Some(&api_key), Some(&secret_key), None, None, None).unwrap();
+        // get the bucket according to the setup in 4everland dashboard
+        let bucket = Bucket::new(
+            &bucket_name,
+            Region::Custom {
+                region: "us-east-1".into(),
+                endpoint: "https://endpoint.4everland.co".into(), // this endpoint is fixed and should not be changed
+            },
+            credentials,
+        )
+        .unwrap();
+
+        // compute the doc name
+        let ipfs_doc_name = format! {"{}_block_{}_{}", aggregated_op.get_action_caption(), aggregated_op.l1_batch_range().start().0, aggregated_op.l1_batch_range().end().0};
+        // add each aggregated_op to ipfs
+        let mut contents = match &aggregated_op {
+            AggregatedOperation::Commit(prev_l1_batch, l1_batches, pubdata_da) => {
+                // tracing::info!("CommitBatches operation: ");
+                // tracing::info!("prev_l1_batch: {:?}", prev_l1_batch);
+                // tracing::info!("l1_batches: {:?}", l1_batches);
+                // tracing::info!("pubdata_da: {:?}", pubdata_da);
+
+                let contents = (prev_l1_batch, l1_batches, pubdata_da);
+                let data = Cursor::new(serde_json::to_string(&contents).unwrap());
+                data
+            }
+            AggregatedOperation::PublishProofOnchain(op) => {
+                // tracing::info!("ProveBatches operation: ");
+                // tracing::info!("prev_l1_batch: {:?}", op.prev_l1_batch);
+                // tracing::info!("l1_batches: {:?}", op.l1_batches);
+                // tracing::info!("proofs: {:?}", op.proofs);
+
+                let contents = (&op.prev_l1_batch, &op.l1_batches, &op.proofs);
+                let data = Cursor::new(serde_json::to_string(&contents).unwrap());
+                data
+            }
+            AggregatedOperation::Execute(op) => {
+                // tracing::info!("ExecuteBatches operation: ");
+                // tracing::info!("l1_batches: {:?}", op.l1_batches);
+
+                let contents = &op.l1_batches;
+                let data = Cursor::new(serde_json::to_string(&contents).unwrap());
+                data
+            }
+        };
+
+        // put this document to 4everland/ipfs
+        let response_data = bucket
+            .put_object_stream(&mut contents, ipfs_doc_name.clone())
+            .await
+            .unwrap();
+        tracing::info!(
+            "put {} to ipfs and get response code: {:?}",
+            ipfs_doc_name,
+            response_data.status_code()
+        );
+
+        // get the head of the document and obtain the ipfs hash
+        let (head, _) = bucket.head_object(ipfs_doc_name.clone()).await.unwrap();
+        let metadata = head.metadata.unwrap();
+        let hash = metadata.get("ipfs-hash").unwrap();
+        tracing::info!("get {} from ipfs with cid: {:?}", ipfs_doc_name, hash);
+        // add this hash to the queue
+        self.ipfs_hash_queue.push(hash.clone());
+
+        // if block_number reaches the BATCH_SIZE, report the hashes to ipfs and then mintlayer
+        let batch_size: usize = env::var("ML_BATCH_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10 as usize); // the number of aggregated operations for mintlayer, default to 10
+        let hash_queue_limit: usize = batch_size * 3; // the number of ipfs hashes in total to be sent to mintlayer
+        let root_hash: Option<String> = if self.ipfs_hash_queue.len() == hash_queue_limit {
+            let title = format!(
+                "batch_{}_{}",
+                self.ipfs_hash_queue[0],
+                self.ipfs_hash_queue.last().unwrap()
+            );
+            let contents = self.ipfs_hash_queue.clone();
+            let mut data = Cursor::new(serde_json::to_string(&contents).unwrap());
+
+            // put this document to 4everland/ipfs
+            let response_data = bucket
+                .put_object_stream(&mut data, title.clone())
+                .await
+                .unwrap();
+            tracing::info!(
+                "put hashes {} to ipfs and get response code: {:?}",
+                title,
+                response_data.status_code()
+            );
+
+            // get the head of the document and obtain the final root hash
+            let (head, _) = bucket.head_object(title.clone()).await.unwrap();
+            let metadata = head.metadata.unwrap();
+            let hash = metadata.get("ipfs-hash").unwrap();
+            tracing::info!(
+                "get hashes {} from ipfs with cid: {:?}",
+                ipfs_doc_name,
+                hash
+            );
+
+            // clear the queue
+            self.ipfs_hash_queue.clear();
+
+            Some(hash.into())
+        } else {
+            None
+        };
+
+        if root_hash.is_some() {
+            // mintlayer
+            let mintlayer_rpc_url = env::var("ML_RPC_URL").unwrap();
+            let mintlayer_client = Client::new();
+            let headers = {
+                let mut headers = reqwest::header::HeaderMap::new();
+                headers.insert("Content-Type", "application/json".parse().unwrap());
+                headers
+            };
+
+            // add the digest to mintlayer
+            let payload = json!({
+                "method": "address_deposit_data",
+                "params": {
+                    "data": hex::encode(root_hash.unwrap()), // try to convert the hash to hex string according to ASCII
+                    "account": 0, // default to use account 0
+                    "options": {}
+                },
+                "jsonrpc": "2.0",
+                "id": 1,
+            });
+            let response = mintlayer_client
+                .post(&mintlayer_rpc_url)
+                .headers(headers)
+                .json(&payload)
+                .send()
+                .await
+                .unwrap();
+            let response_text = response.text().await.unwrap();
+            let response_json: Value = serde_json::from_str(&response_text).unwrap();
+            tracing::info!(
+                "add root digest to mintlayer with L1 tx_info: {}",
+                serde_json::to_string(&response_json).unwrap()
+            );
+        }
     }
 
     async fn report_eth_tx_saving(

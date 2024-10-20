@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# docker compose up -d
+
+# usage: ./start.sh INSTANCE_TYPE 
+# Instance type is specifying the docker image to take:
+# see https://hub.docker.com/r/matterlabs/local-node/tags for full list.
+# latest2.0 - is the 'main' one.
+
+INSTANCE_TYPE=${1:-zkmintlayer-dev}
+
+export INSTANCE_TYPE=$INSTANCE_TYPE
+echo "Starting ZKMintlayer Dev with instance type: $INSTANCE_TYPE"
+docker compose -f docker-compose-dev.yml pull
+docker compose -f docker-compose-dev.yml up 
+# docker compose -f docker-compose-dev.yml up -d
+
+check_all_services_healthy() {
+  service="zkmintlayer"
+  # service="zksync"
+  (docker compose ps $service | grep "(healthy)")
+  if [ $? -eq 0 ]; then
+    return 0
+  else
+    return 1  # If any service is not healthy, return 1
+  fi
+}
+
+# Loop until all services are healthy
+while ! check_all_services_healthy; do
+  echo "Services are not yet healthy, waiting..."
+  sleep 10  # Check every 10 seconds
+done
+
+echo "All services are healthy!"
+
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+DARKGRAY='\033[0;30m'
+ORANGE='\033[0;33m'
+echo -e "${GREEN}"
+
+echo -e "SUCCESS, Your local ZKMintlayer Dev is now running! Find the information below for accessing each service."
+echo -e "┌──────────────────────────┬────────────────────────┬──────────────────────────────────────────────────┐"
+echo -e "│         Service          │          URL           │                   Description                    │"
+echo -e "├──────────────────────────┼────────────────────────┼──────────────────────────────────────────────────┤"
+echo -e "│ ${ORANGE}HyperExplorer            ${GREEN}│ ${BLUE}http://localhost:25000${GREEN} │ ${DARKGRAY}Explorer for communication between ZK Chains     ${GREEN}│"
+echo -e "│ ${ORANGE}L1 Explorer              ${GREEN}│ ${BLUE}http://localhost:25001${GREEN} │ ${DARKGRAY}Block Explorer for Layer 1 (reth)                ${GREEN}│"
+echo -e "│ ${ORANGE}L2 Explorer (All Chains) ${GREEN}│ ${BLUE}http://localhost:25005${GREEN} │ ${DARKGRAY}Block Explorer for all L2 ZK Chains              ${GREEN}│"
+echo -e "│ ${ORANGE}L1 Chain (reth)          ${GREEN}│ ${BLUE}http://localhost:25045${GREEN} │ ${DARKGRAY}HTTP Endpoint for L1 reth node                   ${GREEN}│"
+echo -e "│ ${ORANGE}ZK Mintlayer             ${GREEN}│ ${BLUE}http://localhost:25100${GREEN} │ ${DARKGRAY}HTTP Endpoint for L2 ZK Chain                    ${GREEN}│"
+echo -e "│ ${ORANGE}                         ${GREEN}│ ${BLUE}ws://localhost:25101${GREEN}   │ ${DARKGRAY}Websocket Endpoint for L2 ZK Chain               ${GREEN}│"
+echo -e "│ ${ORANGE}                         ${GREEN}│ ${BLUE}http://localhost:25102${GREEN} │ ${DARKGRAY}ZK Chain Explorer API                            ${GREEN}│"
+echo -e "│ ${ORANGE}pgAdmin                  ${GREEN}│ ${BLUE}http://localhost:25430${GREEN} │ ${DARKGRAY}UI to manage the PostgreSQL databases            ${GREEN}│"
+echo -e "│ ${ORANGE}PostgreSQL DB Server     ${GREEN}│ ${BLUE}http://localhost:25432${GREEN} │ ${DARKGRAY}Database server for all services running locally ${GREEN}│"
+echo -e "└──────────────────────────┴────────────────────────┴──────────────────────────────────────────────────┘"

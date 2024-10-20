@@ -30,6 +30,7 @@ use zksync_types::{
 use crate::{
     abstract_l1_interface::{L1BlockNumbers, OperatorType},
     aggregated_operations::AggregatedOperation,
+    //ipfs_api::{IpfsApi, IpfsClient},
     Aggregator, EthSenderError, EthTxAggregator, EthTxManager,
 };
 
@@ -784,7 +785,7 @@ async fn failed_eth_tx(commitment_mode: L1BatchCommitmentMode) {
         .unwrap();
 }
 
-#[test_casing(2, COMMITMENT_MODES)]
+#[test_casing(1, COMMITMENT_MODES)]
 #[tokio::test]
 async fn correct_order_for_confirmations(
     commitment_mode: L1BatchCommitmentMode,

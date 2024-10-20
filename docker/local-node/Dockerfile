@@ -1,6 +1,7 @@
 # Image is always built from the server image to reuse the common parts
 # This image is expected to be built locally beforehand (implemented in the `zk` tool)
-ARG BASE_VERSION=latest2.0
+# ARG BASE_VERSION=latest2.0
+ARG BASE_VERSION=zkmintlayer
 FROM matterlabs/server-v2:${BASE_VERSION}
 
 WORKDIR /
@@ -34,6 +35,8 @@ COPY infrastructure/zk /infrastructure/zk
 COPY infrastructure/local-setup-preparation /infrastructure/local-setup-preparation
 # Copy dev configs
 COPY etc/env /etc/env
+# Copy `utils` tool
+COPY etc/utils /etc/utils
 # Copy test configs (required to list rich accounts)
 COPY etc/test_config /etc/test_config
 # Copy all the L1 contracts so they can be deployed
@@ -48,8 +51,11 @@ ENV ZKSYNC_ACTION=dont_ask
 
 # Build all the required TS packages
 
+# Build `utils` tool and link
+RUN cd /etc/utils && yarn && yarn link && cd /
 # Build `zk` tool
-RUN cd /infrastructure/zk && yarn && yarn build && cd /
+RUN cd /infrastructure/zk && yarn link utils && yarn && yarn build && cd /
+# RUN cd /infrastructure/zk && yarn && yarn build && cd /
 # Build `local-setup-preparation` tool
 RUN cd /infrastructure/local-setup-preparation && yarn && cd /
 # Build L1 contracts package (contracts themselves should be already built)

@@ -1,0 +1,197 @@
+
+# - L1 (reth) with explorer (blockscout)
+# - a single postgres (with all the databases)
+# - L2 zkmintlayer chain, together with its explorer
+
+# Ports:
+#  - l1 explorer:  http://localhost:25001 (also using 25001, 25002, 25003)
+#  - L1 chain (reth): 
+#      - 25045 - rpc
+#  - L2 chain (zkmintlayer):
+#      - 25100 - http
+#      - 25101 - ws
+
+# Database is on 25432
+# pgAdmin to manage PostgreSQL DB is on 25430
+
+services:
+  reth:
+    restart: always
+    image: "ghcr.io/paradigmxyz/reth:v0.2.0-beta.2"
+    volumes:
+      - type: bind
+        source: ./reth_chaindata
+        target: /chaindata
+
+    command: node --dev --datadir /rethdata --http --http.corsdomain "*" --http.addr 0.0.0.0 --http.port 8545  --dev.block-time 300ms --chain /chaindata/reth_config
+    environment:
+      - RUST_LOG=warn
+    ports:
+      - 127.0.0.1:25045:8545
+
+  postgres:
+    image: "postgres:14"
+    # To create necessary databases for block explorer.
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: postgres -c 'max_connections=200'
+    ports:
+      - 127.0.0.1:25432:5432
+    environment:
+      # We bind only to 127.0.0.1, so setting insecure password is acceptable here
+      - POSTGRES_PASSWORD=notsecurepassword
+  
+  pgadmin4:
+    image: dcagatay/pwless-pgadmin4:latest
+    ports:
+      - 127.0.0.1:25430:80
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: notsecurepassword
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+    restart: unless-stopped
+
+  zkmintlayer:
+    stdin_open: true
+    tty: true
+    image: matterlabs/local-node:${INSTANCE_TYPE:-zkmintlayer-dev}
+    healthcheck:
+      test: curl --fail http://localhost:3071/health || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 200
+      start_period: 30s
+    environment:
+      - DATABASE_PROVER_URL=postgresql://postgres:notsecurepassword@postgres:5432/prover_local
+      - DATABASE_URL=postgresql://postgres:notsecurepassword@postgres:5432/zksync_local
+      - ETH_CLIENT_WEB3_URL=http://reth:8545
+      - LEGACY_BRIDGE_TESTING=1
+      # - IPFS_API_URL=http://ipfs:5001
+      - ML_RPC_URL=http://host.docker.internal:13034 # change if necessary
+      - ML_BATCH_SIZE=10 # change if necessary
+      - 4EVERLAND_API_KEY=5F2R8SK2EQNSNCHSRWIK # only for test
+      - 4EVERLAND_SECRET_KEY=sCGfIdQZfis8YVCXnQP53SL8cPdRxyzjPLh1KYmF # only for test
+      - 4EVERLAND_BUCKET_NAME=zkmintlayer # only for test
+    ports:
+      - 127.0.0.1:25100:3050 # JSON RPC HTTP port
+      - 127.0.0.1:25101:3051 # JSON RPC WS port
+    depends_on:
+      - reth
+      - postgres
+      - proxy-relay
+    volumes:
+      - shared_config:/etc/env/target
+      - shared_tokens:/etc/tokens
+    extra_hosts:
+      - host.docker.internal:host-gateway
+
+  proxy-relay:
+    image: alpine/socat:latest
+    network_mode: host
+    command: TCP-LISTEN:13034,fork,bind=host.docker.internal TCP-CONNECT:127.0.0.1:13034
+    extra_hosts:
+      - host.docker.internal:host-gateway
+
+  # ipfs:
+  #   image: ipfs/kubo:latest
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ipfs_path:/data/ipfs
+  #     - ipfs_fuse:/ipfs
+  #     - ipns_fuse:/ipns
+  #   environment:
+  #     - IPFS_PATH=/data/ipfs
+  #   ports:
+  #     # Swarm listens on all interfaces, so is remotely reachable.
+  #     - 4001:4001/tcp
+  #     - 4001:4001/udp
+      
+  #     # The following ports only listen on the loopback interface, so are not remotely reachable by default.
+  #     # If you want to override these or add more ports, see https://docs.docker.com/compose/extends/ .
+      
+  #     # API port, which includes admin operations, so you probably don't want this remotely accessible.
+  #     - 127.0.0.1:5001:5001
+  #     # HTTP Gateway
+  #     - 127.0.0.1:8080:8080
+
+    
+  # L1 Blockscout explorer: redis
+  redis-db:
+    image: 'redis:alpine'
+    command: redis-server
+  
+  # L1 Blockscout explorer: backend
+  backend:
+    depends_on:
+      - postgres
+      - redis-db
+    image: blockscout/blockscout:latest
+    restart: always
+    stop_grace_period: 5m
+    command: sh -c "bin/blockscout eval \"Elixir.Explorer.ReleaseTasks.create_and_migrate()\" && bin/blockscout start"
+    env_file:
+      -  blockscout/common-blockscout.env
+    links:
+      - postgres:database
+    environment:
+        - ETHEREUM_JSONRPC_VARIANT=geth
+        - DATABASE_URL=postgresql://postgres:notsecurepassword@postgres:5432/blockscout
+        - ETHEREUM_JSONRPC_HTTP_URL=http://reth:8545
+        - ETHEREUM_JSONRPC_TRACE_URL=http://reth:8545
+  
+  # L1 Blockscout explorer: frontend
+  frontend:
+    depends_on:
+      - backend
+    image: ghcr.io/blockscout/frontend:latest
+    platform: linux/amd64
+    restart: always
+    env_file:
+      -  blockscout/common-frontend-dev.env
+
+  stats:
+    depends_on:
+      - backend
+    image: ghcr.io/blockscout/stats:latest
+    platform: linux/amd64
+    restart: always
+    env_file:
+      -  blockscout/common-stats.env
+    environment:
+      - STATS__DB_URL=postgresql://postgres:notsecurepassword@postgres:5432/blockscout_stats
+      - STATS__BLOCKSCOUT_DB_URL=postgresql://postgres:notsecurepassword@postgres:5432/blockscout
+      - STATS__CREATE_DATABASE=true
+      - STATS__RUN_MIGRATIONS=true
+
+  proxy:
+    depends_on:
+      - backend
+      - frontend
+      - stats
+    image: nginx
+    volumes:
+      - "./blockscout/proxy:/etc/nginx/templates"
+    environment:
+      BACK_PROXY_PASS: http://backend:4000
+      FRONT_PROXY_PASS: http://frontend:3000
+    ports:
+      - target: 80
+        published: 25001
+      - target: 8080
+        published: 25002
+      - target: 8081
+        published: 25003
+
+  sig-provider:
+    image: ghcr.io/blockscout/sig-provider:latest
+    platform: linux/amd64
+    restart: always
+
+volumes:
+  reth:
+  shared_config:
+  shared_tokens:
+  # ipfs_path:
+  # ipfs_fuse:
+  # ipns_fuse:
