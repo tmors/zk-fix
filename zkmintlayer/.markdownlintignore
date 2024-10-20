@@ -1,9 +1,0 @@
-# Ignore submodule
-bellman-cuda
-
-
-# Ignore Github configuration markdowns
-.github
-
-# Ignore contract submodules
-contracts
